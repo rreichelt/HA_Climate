@@ -1,0 +1,99 @@
+alias: Telegram - Ausgang
+description: >
+  Zentraler Telegram-Ausgang. Sendet Antworten an das angegebene Laufzeitziel.
+  Asynchrone Nachrichten ohne Ziel sind standardmäßig deaktiviert und können
+  lokal für eine kommaseparierte Zielliste aktiviert werden.
+fields:
+  message:
+    name: Nachricht
+    description: Zu sendender Nachrichtentext
+    required: true
+  target:
+    name: Ziel
+    description: |
+      Optionaler Telegram-Chat. Ohne Angabe wird nur bei lokal aktivierter
+      asynchroner Ausgabe an deren konfigurierte Zielliste gesendet.
+    required: false
+sequence:
+  - variables:
+      asynchronous_notifications_enabled: false
+      asynchronous_targets_csv: "__TELEGRAM_ASYNC_CHAT_IDS__"
+      selected_target: |-
+        {{
+          target
+          | default('', true)
+          | string
+          | trim
+        }}
+      asynchronous_targets: |-
+        {% set ns = namespace(items=[]) %}
+        {% for raw_target in asynchronous_targets_csv.split(',') %}
+          {% set candidate = raw_target | trim %}
+          {% if
+            candidate | regex_match('^-?[0-9]+$')
+            and candidate | int not in ns.items
+          %}
+            {% set ns.items = ns.items + [candidate | int] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ selected_target != '' }}"
+        sequence:
+          - action: telegram_bot.send_message
+            data:
+              chat_id: "{{ selected_target }}"
+              parse_mode: plain_text
+              message: "{{ message }}"
+          - variables:
+              response:
+                ok: true
+                sent: true
+                delivery: direct
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{
+                asynchronous_notifications_enabled | bool
+                and asynchronous_targets | count > 0
+              }}
+        sequence:
+          - action: telegram_bot.send_message
+            data:
+              chat_id: "{{ asynchronous_targets }}"
+              parse_mode: plain_text
+              message: "{{ message }}"
+          - variables:
+              response:
+                ok: true
+                sent: true
+                delivery: asynchronous
+                recipient_count: "{{ asynchronous_targets | count }}"
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{
+                asynchronous_notifications_enabled | bool
+                and asynchronous_targets | count == 0
+              }}
+        sequence:
+          - variables:
+              response:
+                ok: false
+                sent: false
+                message: >-
+                  ❌ Telegram-Ausgabe ist aktiviert, aber es sind keine gültigen
+                  asynchronen Ziel-Chats konfiguriert.
+    default:
+      - variables:
+          response:
+            ok: true
+            sent: false
+            skipped: true
+            reason: asynchronous_notifications_disabled
+  - stop: Telegram-Ausgabe abgeschlossen
+    response_variable: response
+mode: queued
+max: 20

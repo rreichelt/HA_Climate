@@ -1,0 +1,53 @@
+alias: Telegram - Eingang
+description: >
+  Empfängt Telegram-Nachrichten, normalisiert den Befehl und übergibt ihn an den
+  zentralen System - Message-Router.
+triggers:
+  - trigger: event
+    event_type: telegram_command
+    id: command
+  - trigger: event
+    event_type: telegram_text
+    id: text
+conditions:
+  - condition: template
+    value_template: |-
+      {{
+        trigger.event.data.chat_id
+        | string
+        == trigger.event.data.user_id
+        | string
+      }}
+actions:
+  - variables:
+      chat_id: "{{ trigger.event.data.chat_id }}"
+      input: |-
+        {% if trigger.id == 'text' %}
+          {{ trigger.event.data.text | default('') | trim | lower }}
+        {% else %}
+          {{ trigger.event.data.command | default('') | trim | lower }}
+          {% if trigger.event.data.args | default([]) | length > 0 %}
+          {{ trigger.event.data.args | join(' ') | trim | lower }}
+          {% endif %}
+        {% endif %}
+      input_normalized: |-
+        {{
+          input
+          | trim
+          | regex_replace('^/', '')
+          | trim
+        }}
+  - action: script.system_message_router
+    data:
+      command: "{{ input_normalized }}"
+    response_variable: response
+  - action: script.telegram_ausgang
+    data:
+      target: "{{ chat_id }}"
+      message: |-
+        {{
+          response.message
+          | default('❌ Keine Antwort vom System - Message-Router.')
+        }}
+mode: queued
+max: 10

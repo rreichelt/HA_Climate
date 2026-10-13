@@ -1,0 +1,176 @@
+alias: System - Status
+description: Erstellt die allgemeine System-Statusmeldung
+fields:
+  command:
+    name: Befehl
+    description: Status-Befehl, z. B. status oder status detail
+    required: true
+sequence:
+  - variables:
+      notifications: >-
+        {% set raw = states('input_text.ha_persistent_notifications') %} {% if
+        raw in ['', 'unknown', 'unavailable'] %}
+          {{ {} }}
+        {% else %}
+          {{ raw | from_json }}
+        {% endif %}
+      notification_count: "{{ notifications | count }}"
+      repair_count: |-
+        {% set ns = namespace(count=0) %} {% for key in issues().keys() %}
+          {% if key not in [
+            ('fritz', 'deprecated_cleanup_button'),
+            ('fritz', 'deprecated_firmware_update_button')
+          ] %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %} {{ ns.count }}
+      update_count: |-
+        {{ states.update
+           | selectattr('state', 'eq', 'on')
+           | list
+           | count }}
+      battery_soc: >-
+        {{ states('sensor.balkon_vorn_solakon_one_batterie_ladestand') |
+        float(0) }}
+      battery_power: "{{ states('sensor.dashboard_noah_leistung') | float(0) }}"
+      network_power: "{{ states('sensor.flur_shelly_3_4_leistung') | float(0) }}"
+      pv_front: "{{ states('sensor.balkon_vorn_solakon_one_pv_leistung') | float(0) }}"
+      pv_back: >-
+        {{ states('sensor.balkon_hinten_hinterer_balkon_gesamtleistung') |
+        float(0) }}
+      ups_battery: "{{ states('sensor.flur_midwayups1_batterie') | float(0) }}"
+      ups_load: "{{ states('sensor.flur_midwayups1_last') | float(0) }}"
+      ups_runtime: "{{ states('sensor.flur_midwayups1_verbleibende_zeit') | float(0) }}"
+      pv_forecast_front_remaining: "{{ states('sensor.energy_production_today_remaining') | float(0) }}"
+      pv_forecast_back_remaining: "{{ states('sensor.energy_production_today_remaining_2') | float(0) }}"
+  - variables:
+      pv_total: "{{ pv_front | float(0) + pv_back | float(0) }}"
+      pv_forecast_total_remaining: |-
+        {{
+          pv_forecast_front_remaining | float(0)
+          +
+          pv_forecast_back_remaining | float(0)
+        }}
+  - variables:
+      message_lines: |-
+        {% set ns = namespace(lines=[]) %}
+        {% if command == 'status' %}
+
+          {% set ns.lines = ns.lines + [
+            '🏠 H3-4 Status',
+            '',
+            ('✅' if notification_count | int == 0 else '⚠️') ~ ' Hinweise: ' ~ notification_count,
+            ('✅' if repair_count | int == 0 else '🔧') ~ ' Reparaturen: ' ~ repair_count,
+            ('✅' if update_count | int == 0 else '🔄') ~ ' Updates: ' ~ update_count,
+            '',
+            '⚡ Netzbezug: ' ~ (network_power | round(0) | int) ~ ' W',
+            '☀️ PV Erzeugung: ' ~ (pv_total | round(0) | int) ~ ' W',
+            '🔋 Akku Status: ' ~ (battery_soc | round(0) | int) ~ ' %',
+            '⚡ Akku Ladung: ' ~ (battery_power | round(0) | int) ~ ' W',
+            '🔌 USV: ' ~ (ups_battery | round(0) | int) ~ ' %',
+            '',
+            'ℹ️ Details mit: status detail'
+          ] %}
+
+        {% elif command == 'status detail' %}
+
+          {% set ns.lines = ns.lines + [
+            '🏠 H3-4 Status – Details',
+            '',
+            '⚠️ Hinweise: ' ~ notification_count
+          ] %}
+
+          {% for id, notification in notifications.items() %}
+            {% set ns.lines = ns.lines + [
+              '• ' ~ (notification.title | default(id, true))
+            ] %}
+
+            {% if notification.message | default('') | trim %}
+              {% set text =
+                notification.message
+                | trim
+                | replace('\n', '\n  ')
+              %}
+              {% set ns.lines = ns.lines + ['  ' ~ text] %}
+            {% endif %}
+          {% endfor %}
+
+          {% set ns.lines = ns.lines + [
+            '',
+            '🔧 Reparaturen: ' ~ repair_count
+          ] %}
+
+          {% for key in issues().keys() %}
+            {% if key not in [
+              ('fritz', 'deprecated_cleanup_button'),
+              ('fritz', 'deprecated_firmware_update_button')
+            ] %}
+              {% set ns.lines = ns.lines + [
+                '• ' ~ key[0] ~ ' / ' ~ key[1]
+              ] %}
+            {% endif %}
+          {% endfor %}
+
+          {% set ns.lines = ns.lines + [
+            '',
+            '🔄 Updates: ' ~ update_count
+          ] %}
+
+          {% for entity in states.update if entity.state == 'on' %}
+            {% if entity.attributes.installed_version is defined
+                  and entity.attributes.latest_version is defined %}
+              {% set ns.lines = ns.lines + [
+                '• ' ~ entity.name ~ ': '
+                ~ entity.attributes.installed_version
+                ~ ' → '
+                ~ entity.attributes.latest_version
+              ] %}
+            {% else %}
+              {% set ns.lines = ns.lines + [
+                '• ' ~ entity.name
+              ] %}
+            {% endif %}
+          {% endfor %}
+
+          {% set ns.lines = ns.lines + [
+            '',
+            '⚡ Energie',
+            '• Netzbezug: ' ~ (network_power | round(0) | int) ~ ' W',
+            '• PV gesamt: ' ~ (pv_total | round(0) | int) ~ ' W',
+            '• PV vorne: ' ~ (pv_front | round(0) | int) ~ ' W',
+            '• PV hinten: ' ~ (pv_back | round(0) | int) ~ ' W',
+            '• Forecast Rest gesamt: ' ~ (pv_forecast_total_remaining | round(2)) ~ ' kWh',
+            '• Forecast Rest vorne: ' ~ (pv_forecast_front_remaining | round(2)) ~ ' kWh',
+            '• Forecast Rest hinten: ' ~ (pv_forecast_back_remaining | round(2)) ~ ' kWh',
+            '',
+            '🔋 Akku',
+            '• Ladestand: ' ~ (battery_soc | round(0) | int) ~ ' %',
+            '• Ladung: ' ~ (battery_power | round(0) | int) ~ ' W',
+            '',
+            '🔌 USV',
+            '• Akku: ' ~ (ups_battery | round(0) | int) ~ ' %',
+            '• Auslastung: ' ~ (ups_load | round(0) | int) ~ ' %',
+            '• Restlaufzeit: ' ~ (ups_runtime | round(0) | int) ~ ' min'
+          ] %}
+
+        {% else %}
+
+          {% set ns.lines = [
+            '❓ Unbekannter Status-Befehl: ' ~ command,
+            '',
+            'Verfügbar:',
+            'status',
+            'status detail'
+          ] %}
+
+        {% endif %}
+        {{ ns.lines }}
+  - variables:
+      response:
+        ok: "{{ command in ['status', 'status detail'] }}"
+        command: "{{ command }}"
+        message: "{{ message_lines | join('\\n') }}"
+  - stop: Status erstellt
+    response_variable: response
+mode: queued
+max: 10

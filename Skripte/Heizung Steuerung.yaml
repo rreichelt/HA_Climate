@@ -1,0 +1,409 @@
+alias: Heizung - Steuerung
+description: >
+  Steuert die Shelly-Heizkörperthermostate sofort oder zeitgesteuert. "aus"
+  setzt intern 4 °C.
+fields:
+  command:
+    name: Befehl
+    required: true
+  acknowledge:
+    name: Zwischenbestätigung
+    description: >
+      Sendet bei sofortiger Ausführung vor dem Setzen eine kurze Bestätigung.
+      Für Scheduler-Aufrufe auf false setzen.
+    required: false
+    default: true
+sequence:
+  - action: script.system_raum_mapping
+    response_variable: mapping
+  - variables:
+      rooms: "{{ mapping.rooms }}"
+      aliases: "{{ mapping.aliases }}"
+      frost_temp: 4
+      body: |-
+        {{
+          command
+          | default('')
+          | string
+          | trim
+          | lower
+          | regex_replace('^/', '')
+          | regex_replace('^heizung\s+', '')
+          | trim
+        }}
+  - action: script.system_zeitplanung
+    data:
+      text: "{{ body }}"
+    response_variable: plan
+  - if:
+      - condition: template
+        value_template: "{{ not (plan.ok | default(false) | bool) }}"
+    then:
+      - stop: Zeitplanung abgelehnt
+        response_variable: plan
+  - variables:
+      tokens: "{{ plan.action.split() }}"
+      first: "{{ plan.action.split()[0] if plan.action.split() | count > 0 else '' }}"
+  - variables:
+      value_first: |-
+        {{ first in ['aus', 'off']
+           or first | regex_match('^[0-9]+(?:[\.,][0-9]+)?$') }}
+  - variables:
+      requested_room: |-
+        {{ 'alle' if value_first | bool or first == 'alle'
+           else aliases.get(first, '') }}
+      value_token: |-
+        {{ first if value_first | bool
+           else (tokens[1] if tokens | count > 1 else '') }}
+      extra_tokens: |-
+        {{ tokens[1:] if value_first | bool
+           else (tokens[2:] if tokens | count > 2 else []) }}
+  - variables:
+      is_off: "{{ value_token in ['aus', 'off'] }}"
+      requested_temperature: |-
+        {% if value_token in ['aus', 'off'] %}
+          {{ frost_temp }}
+        {% elif value_token | regex_match('^[0-9]+(?:[\.,][0-9]+)?$') %}
+          {{ value_token | replace(',', '.') | float }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ requested_room == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Unbekannter Raum: {{ first }}"
+      - stop: Unbekannter Raum
+        response_variable: response
+  - variables:
+      target_rooms: |-
+        {% set ns = namespace(items=[]) %}
+        {% if requested_room == 'alle' %}
+
+          {% for key, room in rooms.items() %}
+            {% if
+              room.systems is defined
+              and room.systems.heating is defined
+              and room.systems.heating.entity
+            %}
+              {% set ns.items = ns.items + [key] %}
+            {% endif %}
+          {% endfor %}
+
+        {% elif requested_room in rooms %}
+
+          {% set room = rooms[requested_room] %}
+
+          {% if
+            room.systems is defined
+            and room.systems.heating is defined
+            and room.systems.heating.entity
+          %}
+            {% set ns.items = [requested_room] %}
+          {% endif %}
+
+        {% endif %}
+        {{ ns.items }}
+  - if:
+      - condition: template
+        value_template: "{{ target_rooms | count == 0 }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Für diesen Raum ist keine Heizung konfiguriert.
+      - stop: Keine Heizung
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ value_token == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: |-
+              ❌ Solltemperatur fehlt.
+
+              Beispiele:
+              heizung az 22
+              heizung az aus
+      - stop: Solltemperatur fehlt
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ requested_temperature == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Ungültige Solltemperatur: {{ value_token }}"
+      - stop: Ungültige Temperatur
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            requested_temperature | float < 4
+            or requested_temperature | float > 30
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Die Heizung unterstützt Sollwerte von 4 bis 30 °C.
+      - stop: Sollwert außerhalb Bereich
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ extra_tokens | count > 0 }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Unbekannte Parameter: {{ extra_tokens | join(', ') }}"
+      - stop: Unbekannte Parameter
+        response_variable: response
+  - variables:
+      after_is_off: "{{ plan.after in ['aus', 'off'] }}"
+      after_temperature: |-
+        {% if plan.after in ['aus', 'off'] %}
+          {{ frost_temp }}
+        {% elif plan.after | regex_match('^[0-9]+(?:[\.,][0-9]+)?$') %}
+          {{ plan.after | replace(',', '.') | float }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            plan.after != ''
+            and after_temperature == ''
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Folgeaktion nicht verstanden: {{ plan.after }}"
+      - stop: Folgeaktion ungültig
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            plan.after != ''
+            and (
+              after_temperature | float < 4
+              or after_temperature | float > 30
+            )
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Die Folge-Solltemperatur muss zwischen 4 und 30 °C liegen.
+      - stop: Folge-Sollwert ungültig
+        response_variable: response
+  - variables:
+      canonical_value: |-
+        {{
+          'aus'
+          if is_off | bool
+          else requested_temperature
+        }}
+      canonical_after: |-
+        {{
+          'aus'
+          if after_is_off | bool
+          else after_temperature
+        }}
+      action_summary: |-
+        {% if is_off | bool %}
+          Heizung Aus
+        {% else %}
+          Heizung {{ requested_temperature }} °C
+        {% endif %}
+      after_summary: |-
+        {% if plan.after == '' %}
+          {{ '' }}
+        {% elif after_is_off | bool %}
+          Heizung Aus
+        {% else %}
+          Heizung {{ after_temperature }} °C
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ plan.planned | bool }}"
+    then:
+      - variables:
+          jobs: |-
+            {% set ns = namespace(items=[]) %}
+            {% for key in target_rooms %}
+              {% set primary_command =
+                'heizung '
+                ~ key
+                ~ ' '
+                ~ canonical_value
+              %}
+
+              {% set description =
+                'reservation: ' ~ primary_command
+                if plan.immediate | bool
+                else primary_command
+              %}
+
+              {% set ns.items =
+                ns.items + [{
+                  'room': key | upper,
+                  'resource': 'heating',
+                  'start_at': plan.start_at,
+                  'end_at': plan.end_at,
+                  'summary': action_summary,
+                  'description': description
+                }]
+              %}
+
+              {% if plan.needs_followup | bool %}
+                {% set ns.items =
+                  ns.items + [{
+                    'room': key | upper,
+                    'resource': 'heating',
+                    'start_at': plan.end_at,
+                    'end_at': (
+                      as_datetime(plan.end_at)
+                      + timedelta(minutes=1)
+                    ).strftime('%Y-%m-%d %H:%M:%S'),
+                    'summary': after_summary,
+                    'description':
+                      'heizung '
+                      ~ key
+                      ~ ' '
+                      ~ canonical_after
+                  }]
+                %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+      - action: script.klima_kalender
+        data:
+          operation: batch_add
+          jobs: "{{ jobs }}"
+        response_variable: calendar_response
+      - if:
+          - condition: template
+            value_template: |-
+              {{
+                not (
+                  calendar_response.ok
+                  | default(false)
+                  | bool
+                )
+              }}
+        then:
+          - stop: Kalenderplanung abgelehnt
+            response_variable: calendar_response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            plan.immediate | bool
+            and acknowledge | default(true) | bool
+          }}
+    then:
+      - action: script.system_nachricht
+        data:
+          message: >-
+            {% if requested_room == 'alle' %}
+              {% if is_off | bool %}
+            👍 Verstanden, setze alle Heizkörper auf Aus.
+              {% else %}
+            👍 Verstanden, setze alle Heizkörper auf {{ requested_temperature }}
+            °C.
+              {% endif %}
+            {% else %}
+              {% if is_off | bool %}
+            👍 Verstanden, setze die Heizung im {{ rooms[requested_room].name }}
+            auf Aus.
+              {% else %}
+            👍 Verstanden, setze {{ requested_temperature }} °C im {{
+            rooms[requested_room].name }}.
+              {% endif %}
+            {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ plan.immediate | bool }}"
+    then:
+      - repeat:
+          for_each: "{{ target_rooms }}"
+          sequence:
+            - action: climate.set_temperature
+              target:
+                entity_id: |-
+                  {{
+                    rooms[repeat.item]
+                    .systems.heating.entity
+                  }}
+              data:
+                temperature: "{{ requested_temperature | float }}"
+  - variables:
+      response:
+        ok: true
+        message: |-
+          {% if not (plan.planned | bool) %}
+          ✅ Heizung gesetzt
+          {% elif plan.immediate | bool %}
+          ▶️ Heizung gestartet
+          {% else %}
+          📅 Heizung geplant
+          {% endif %}
+
+          {% if requested_room == 'alle' %}
+          Räume: Alle Heizkörper
+          {% else %}
+          Raum: {{ rooms[requested_room].name }}
+          {% endif %}
+          {{ action_summary }}
+          {% if plan.planned | bool %}
+
+            {% if plan.immediate | bool %}
+
+          {% if plan.time_mode == 'until' %}Bis{% else %}Ende{% endif %}: {{
+            as_timestamp(plan.end_at)
+            | timestamp_custom('%d.%m.%Y %H:%M', true)
+          }}
+
+            {% else %}
+
+          Start: {{
+            as_timestamp(plan.start_at)
+            | timestamp_custom('%d.%m.%Y %H:%M', true)
+          }}
+
+              {% if
+                plan.time_mode == 'range'
+                or plan.duration_minutes | int > 0
+              %}
+
+          Ende: {{
+            as_timestamp(plan.end_at)
+            | timestamp_custom('%d.%m.%Y %H:%M', true)
+          }}
+
+              {% endif %}
+
+            {% endif %}
+
+            {% if plan.needs_followup | bool %}
+
+          Danach: {{ after_summary }}
+
+            {% endif %}
+
+          {% endif %}
+  - stop: Heizungsbefehl verarbeitet
+    response_variable: response
+mode: queued
+max: 20

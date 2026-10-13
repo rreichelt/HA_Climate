@@ -1,0 +1,573 @@
+alias: Klima - Steuerung
+description: >
+  Steuert die Split-Klimaanlagen sofort oder zeitgesteuert. "klima heizen ba|wc
+  ..." wird an Heizung - Steuerung weitergereicht.
+fields:
+  command:
+    name: Befehl
+    required: true
+sequence:
+  - action: script.system_raum_mapping
+    response_variable: mapping
+  - variables:
+      rooms: "{{ mapping.rooms }}"
+      aliases: "{{ mapping.aliases }}"
+      cfg: "{{ mapping.config.climate }}"
+      hvac_aliases: "{{ cfg.hvac_aliases }}"
+      hvac_labels: "{{ cfg.hvac_labels }}"
+      fan_aliases: "{{ cfg.fan_aliases }}"
+      fan_labels: "{{ cfg.fan_labels }}"
+      timed_default_fan: "{{ cfg.timed_default_fan_mode }}"
+      body: |-
+        {{
+          command
+          | default('')
+          | string
+          | trim
+          | lower
+          | regex_replace('^/', '')
+          | regex_replace('^klima\s+', '')
+          | trim
+        }}
+  - variables:
+      initial_tokens: "{{ body.split() }}"
+      initial_mode: |-
+        {{
+          hvac_aliases.get(initial_tokens[0], '')
+          if initial_tokens | count > 0
+          else ''
+        }}
+      initial_room: |-
+        {{
+          aliases.get(initial_tokens[1], '')
+          if initial_tokens | count > 1
+          else ''
+        }}
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            initial_mode == 'heat'
+            and initial_room in ['ba', 'wc']
+          }}
+    then:
+      - variables:
+          heating_command: >-
+            heizung {{ initial_room }}{% if initial_tokens | count > 2 %} {{
+            initial_tokens[2:] | join(' ') }} {% endif %}
+      - action: script.heizung_steuerung
+        data:
+          command: "{{ heating_command | trim }}"
+        response_variable: response
+      - stop: An Heizungssteuerung übergeben
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            initial_room in ['ba', 'wc']
+            and initial_mode != 'heat'
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ {{ rooms[initial_room].name }} besitzt keine Klimaanlage.
+      - stop: Keine Klimaanlage
+        response_variable: response
+  - action: script.system_zeitplanung
+    data:
+      text: "{{ body }}"
+    response_variable: plan
+  - if:
+      - condition: template
+        value_template: "{{ not (plan.ok | default(false) | bool) }}"
+    then:
+      - stop: Zeitplanung abgelehnt
+        response_variable: plan
+  - variables:
+      tokens: "{{ plan.action.split() }}"
+      mode_token: "{{ tokens[0] if tokens | count > 0 else '' }}"
+      hvac_mode: "{{ hvac_aliases.get(mode_token, '') }}"
+  - if:
+      - condition: template
+        value_template: "{{ hvac_mode == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: |-
+              ❌ Unbekannter Klimamodus: {{ mode_token }}
+
+              Beispiele:
+              klima kühlen az 24
+              klima heizen wz 22
+              klima lüften sz auto
+              klima aus az
+      - stop: Unbekannter Klimamodus
+        response_variable: response
+  - variables:
+      second_token: "{{ tokens[1] if tokens | count > 1 else '' }}"
+      second_as_room: "{{ aliases.get(second_token, '') }}"
+      room_explicit: "{{ second_as_room not in ['', 'alle'] }}"
+      room_all_explicit: "{{ second_as_room == 'alle' }}"
+      requested_room: "{{ second_as_room if room_explicit else 'alle' }}"
+      parameter_offset: "{{ 2 if room_explicit or room_all_explicit else 1 }}"
+      params: "{{ tokens[parameter_offset:] }}"
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            room_explicit
+            and (
+              requested_room not in rooms
+              or not rooms[requested_room].climate
+            )
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: |-
+              ❌ {{
+                rooms[requested_room].name
+                if requested_room in rooms
+                else second_token
+              }} besitzt keine Klimaanlage.
+      - stop: Keine Klimaanlage
+        response_variable: response
+  - variables:
+      needs_temp: "{{ hvac_mode in ['cool', 'heat', 'auto'] }}"
+      temp_token: |-
+        {{
+          params[0]
+          if needs_temp and params | count > 0
+          else ''
+        }}
+      target_temp: |-
+        {% if temp_token | regex_match('^[0-9]+(?:[\.,][0-9]+)?$') %}
+          {{ temp_token | replace(',', '.') | float }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+      fan_token: |-
+        {% if hvac_mode in ['cool', 'heat', 'auto'] %}
+          {{ params[1] if params | count > 1 else '' }}
+        {% elif hvac_mode in ['fan_only', 'dry'] %}
+          {{ params[0] if params | count > 0 else '' }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+      fan_mode: |-
+        {{
+          fan_aliases.get(fan_token, '')
+          if fan_token != ''
+          else ''
+        }}
+      expected_params: |-
+        {% if hvac_mode in ['cool', 'heat', 'auto'] %}
+          {{ 1 + (1 if fan_token != '' else 0) }}
+        {% elif hvac_mode in ['fan_only', 'dry'] %}
+          {{ 1 if fan_token != '' else 0 }}
+        {% else %}
+          0
+        {% endif %}
+      extra_params: "{{ params[expected_params:] }}"
+  - if:
+      - condition: template
+        value_template: "{{ needs_temp and target_temp == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Solltemperatur fehlt oder ist ungültig.
+      - stop: Solltemperatur fehlt
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            target_temp != ''
+            and (
+              target_temp | float < 16
+              or target_temp | float > 31
+            )
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Die Klimaanlage unterstützt 16 bis 31 °C.
+      - stop: Temperatur außerhalb Bereich
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ fan_token != '' and fan_mode == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Unbekannte Lüfterstufe: {{ fan_token }}"
+      - stop: Unbekannte Lüfterstufe
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ extra_params | count > 0 }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Unbekannte Parameter: {{ extra_params | join(', ') }}"
+      - stop: Unbekannte Parameter
+        response_variable: response
+  - variables:
+      target_rooms: |-
+        {% set ns = namespace(items=[]) %}
+        {% if requested_room == 'alle' %}
+          {% for key, room in rooms.items() %}
+            {% if room.climate %}
+              {% set ns.items = ns.items + [key] %}
+            {% endif %}
+          {% endfor %}
+        {% else %}
+          {% set ns.items = [requested_room] %}
+        {% endif %}
+        {{ ns.items }}
+  - variables:
+      after_tokens: "{{ plan.after.split() }}"
+      after_mode: |-
+        {{
+          hvac_aliases.get(after_tokens[0], '')
+          if after_tokens | count > 0
+          else ''
+        }}
+      after_needs_temp: "{{ after_mode in ['cool', 'heat', 'auto'] }}"
+      after_temp: |-
+        {% if
+          after_needs_temp
+          and after_tokens | count > 1
+          and after_tokens[1]
+              | regex_match('^[0-9]+(?:[\.,][0-9]+)?$')
+        %}
+          {{ after_tokens[1] | replace(',', '.') | float }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+      after_fan_token: |-
+        {% if after_mode in ['cool', 'heat', 'auto'] %}
+          {{ after_tokens[2] if after_tokens | count > 2 else '' }}
+        {% elif after_mode in ['fan_only', 'dry'] %}
+          {{ after_tokens[1] if after_tokens | count > 1 else '' }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+      after_fan: |-
+        {{
+          fan_aliases.get(after_fan_token, '')
+          if after_fan_token != ''
+          else ''
+        }}
+      after_expected: |-
+        {% if after_mode in ['cool', 'heat', 'auto'] %}
+          {{ 2 + (1 if after_fan_token != '' else 0) }}
+        {% elif after_mode in ['fan_only', 'dry'] %}
+          {{ 1 + (1 if after_fan_token != '' else 0) }}
+        {% elif after_mode == 'off' %}
+          1
+        {% else %}
+          0
+        {% endif %}
+      after_extra: "{{ after_tokens[after_expected:] }}"
+  - if:
+      - condition: template
+        value_template: "{{ plan.after != '' and after_mode == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Folgeaktion nicht verstanden: {{ plan.after }}"
+      - stop: Folgeaktion ungültig
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ after_needs_temp and after_temp == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Bei der Folgeaktion fehlt die Solltemperatur.
+      - stop: Folge-Sollwert fehlt
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            after_temp != ''
+            and (
+              after_temp | float < 16
+              or after_temp | float > 31
+            )
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Folge-Sollwert muss zwischen 16 und 31 °C liegen.
+      - stop: Folge-Sollwert ungültig
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ after_fan_token != '' and after_fan == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Unbekannte Lüfterstufe: {{ after_fan_token }}"
+      - stop: Folge-Lüfter ungültig
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: "{{ after_extra | count > 0 }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: >-
+              ❌ Unbekannte Parameter in Folgeaktion: {{ after_extra | join(', ')
+              }}
+      - stop: Folgeparameter ungültig
+        response_variable: response
+  - variables:
+      mode_word: >-
+        {% if hvac_mode == 'cool' %}kühlen {% elif hvac_mode == 'heat' %}heizen
+        {% elif hvac_mode == 'fan_only' %}lüften {% elif hvac_mode == 'dry'
+        %}entfeuchten {% elif hvac_mode == 'auto' %}auto {% else %}aus {% endif
+        %}
+      after_word: >-
+        {% if after_mode == 'cool' %}kühlen {% elif after_mode == 'heat'
+        %}heizen {% elif after_mode == 'fan_only' %}lüften {% elif after_mode ==
+        'dry' %}entfeuchten {% elif after_mode == 'auto' %}auto {% elif
+        after_mode == 'off' %}aus {% else %}{{ '' }} {% endif %}
+      scheduled_fan: |-
+        {% if hvac_mode == 'off' %}
+          {{ '' }}
+        {% elif fan_mode != '' %}
+          {{ fan_mode }}
+        {% else %}
+          {{ timed_default_fan }}
+        {% endif %}
+      action_suffix: |-
+        {% if hvac_mode in ['cool', 'heat', 'auto'] %}
+          {{ target_temp }}{% if scheduled_fan != '' %} {{ scheduled_fan }}{% endif %}
+        {% elif hvac_mode in ['fan_only', 'dry'] and scheduled_fan != '' %}
+          {{ scheduled_fan }}
+        {% endif %}
+      after_suffix: |-
+        {% if after_mode in ['cool', 'heat', 'auto'] %}
+          {{ after_temp }}{% if after_fan != '' %} {{ after_fan }}{% endif %}
+        {% elif after_mode in ['fan_only', 'dry'] and after_fan != '' %}
+          {{ after_fan }}
+        {% endif %}
+      action_summary: |-
+        {% if hvac_mode == 'off' %}
+          Klima Aus
+        {% elif hvac_mode == 'cool' %}
+          Klima Kühlen {{ target_temp }} °C
+        {% elif hvac_mode == 'heat' %}
+          Klima Heizen {{ target_temp }} °C
+        {% elif hvac_mode == 'auto' %}
+          Klima Automatik {{ target_temp }} °C
+        {% elif hvac_mode == 'fan_only' %}
+          Klima Lüften
+        {% elif hvac_mode == 'dry' %}
+          Klima Entfeuchten
+        {% endif %}
+      after_summary: |-
+        {% if after_mode == 'off' %}
+          Klima Aus
+        {% elif after_mode == 'cool' %}
+          Klima Kühlen {{ after_temp }} °C
+        {% elif after_mode == 'heat' %}
+          Klima Heizen {{ after_temp }} °C
+        {% elif after_mode == 'auto' %}
+          Klima Automatik {{ after_temp }} °C
+        {% elif after_mode == 'fan_only' %}
+          Klima Lüften
+        {% elif after_mode == 'dry' %}
+          Klima Entfeuchten
+        {% else %}
+          {{ '' }}
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ plan.planned | bool }}"
+    then:
+      - variables:
+          jobs: |-
+            {% set ns = namespace(items=[]) %}
+            {% for key in target_rooms %}
+              {% set primary_command =
+                'klima '
+                ~ mode_word
+                ~ ' '
+                ~ key
+                ~ (
+                    ' ' ~ action_suffix
+                    if action_suffix | trim != ''
+                    else ''
+                  )
+              %}
+
+              {% set description =
+                'reservation: ' ~ primary_command
+                if plan.immediate | bool
+                else primary_command
+              %}
+
+              {% set ns.items =
+                ns.items + [{
+                  'room': key | upper,
+                  'resource': 'climate',
+                  'start_at': plan.start_at,
+                  'end_at': plan.end_at,
+                  'summary': action_summary,
+                  'description': description
+                }]
+              %}
+
+              {% if plan.needs_followup | bool %}
+                {% set follow_command =
+                  'klima '
+                  ~ after_word
+                  ~ ' '
+                  ~ key
+                  ~ (
+                      ' ' ~ after_suffix
+                      if after_suffix | trim != ''
+                      else ''
+                    )
+                %}
+
+                {% set ns.items =
+                  ns.items + [{
+                    'room': key | upper,
+                    'resource': 'climate',
+                    'start_at': plan.end_at,
+                    'end_at': (
+                      as_datetime(plan.end_at)
+                      + timedelta(minutes=1)
+                    ).strftime('%Y-%m-%d %H:%M:%S'),
+                    'summary': after_summary,
+                    'description': follow_command
+                  }]
+                %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+      - action: script.klima_kalender
+        data:
+          operation: batch_add
+          jobs: "{{ jobs }}"
+        response_variable: calendar_response
+      - if:
+          - condition: template
+            value_template: |-
+              {{
+                not (
+                  calendar_response.ok
+                  | default(false)
+                  | bool
+                )
+              }}
+        then:
+          - stop: Kalenderplanung abgelehnt
+            response_variable: calendar_response
+  - if:
+      - condition: template
+        value_template: "{{ plan.immediate | bool }}"
+    then:
+      - repeat:
+          for_each: "{{ target_rooms }}"
+          sequence:
+            - action: climate.set_hvac_mode
+              target:
+                entity_id: "{{ rooms[repeat.item].climate }}"
+              data:
+                hvac_mode: "{{ hvac_mode }}"
+            - if:
+                - condition: template
+                  value_template: "{{ needs_temp }}"
+              then:
+                - action: climate.set_temperature
+                  target:
+                    entity_id: "{{ rooms[repeat.item].climate }}"
+                  data:
+                    temperature: "{{ target_temp | float }}"
+            - if:
+                - condition: template
+                  value_template: "{{ fan_mode != '' }}"
+              then:
+                - action: climate.set_fan_mode
+                  target:
+                    entity_id: "{{ rooms[repeat.item].climate }}"
+                  data:
+                    fan_mode: "{{ fan_mode }}"
+  - variables:
+      response:
+        ok: true
+        message: |-
+          {% if not (plan.planned | bool) %}
+          ✅ Klima gesetzt
+          {% elif plan.immediate | bool %}
+          ▶️ Klima gestartet
+          {% else %}
+          📅 Klima geplant
+          {% endif %}
+
+          {% if requested_room == 'alle' %}
+          Räume: Alle Klimageräte
+          {% else %}
+          Raum: {{ rooms[requested_room].name }}
+          {% endif %}
+          {{ action_summary }}
+          {% if plan.planned | bool %}
+
+            {% if plan.immediate | bool %}
+
+          {% if plan.time_mode == 'until' %}Bis{% else %}Ende{% endif %}: {{
+            as_timestamp(plan.end_at)
+            | timestamp_custom('%d.%m.%Y %H:%M', true)
+          }}
+
+            {% else %}
+
+          Start: {{
+            as_timestamp(plan.start_at)
+            | timestamp_custom('%d.%m.%Y %H:%M', true)
+          }}
+
+              {% if
+                plan.time_mode == 'range'
+                or plan.duration_minutes | int > 0
+              %}
+
+          Ende: {{
+            as_timestamp(plan.end_at)
+            | timestamp_custom('%d.%m.%Y %H:%M', true)
+          }}
+
+              {% endif %}
+
+            {% endif %}
+
+            {% if plan.needs_followup | bool %}
+
+          Danach: {{ after_summary }}
+
+            {% endif %}
+
+          {% endif %}
+  - stop: Klimabefehl verarbeitet
+    response_variable: response
+mode: queued
+max: 20

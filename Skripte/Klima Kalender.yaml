@@ -1,0 +1,662 @@
+alias: Klima - Kalender
+description: >
+  Zentrale Verwaltung geplanter Klima- und Heizungs-Jobs inklusive Anzeige und
+  Kollisionsprüfung.
+fields:
+  command:
+    name: Befehl
+    required: false
+  operation:
+    name: Operation
+    required: false
+    default: user
+  jobs:
+    name: Jobs
+    required: false
+    default: []
+sequence:
+  - action: script.system_raum_mapping
+    response_variable: mapping
+  - variables:
+      rooms: "{{ mapping.rooms }}"
+      aliases: "{{ mapping.aliases }}"
+      op: |-
+        {{
+          operation
+          | default('user')
+          | string
+          | trim
+          | lower
+        }}
+      cmd: |-
+        {{
+          command
+          | default('')
+          | string
+          | trim
+          | lower
+          | regex_replace('^/', '')
+          | trim
+        }}
+      parts: "{{ cmd.split() }}"
+  - if:
+      - condition: template
+        value_template: "{{ op == 'batch_add' }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ jobs | default([]) | count == 0 }}"
+        then:
+          - variables:
+              response:
+                ok: false
+                collision: false
+                message: ❌ Keine Jobs zum Anlegen übergeben.
+          - stop: Keine Jobs übergeben
+            response_variable: response
+      - variables:
+          query_start: >-
+            {% set ns = namespace(value=none) %} {% for job in jobs %}
+              {% set ts = as_timestamp(job.start_at) %}
+              {% if ns.value is none or ts < ns.value %}
+                {% set ns.value = ts %}
+              {% endif %}
+            {% endfor %} {{ ns.value | timestamp_custom('%Y-%m-%d %H:%M:%S',
+            true) }}
+          query_end: >-
+            {% set ns = namespace(value=none) %} {% for job in jobs %}
+              {% set ts = as_timestamp(job.end_at) %}
+              {% if ns.value is none or ts > ns.value %}
+                {% set ns.value = ts %}
+              {% endif %}
+            {% endfor %} {{ ns.value | timestamp_custom('%Y-%m-%d %H:%M:%S',
+            true) }}
+      - action: calendar.get_events
+        target:
+          entity_id: calendar.klima
+        data:
+          start_date_time: "{{ query_start }}"
+          end_date_time: "{{ query_end }}"
+        response_variable: calendar_data
+      - variables:
+          existing_collision_message: |-
+            {% set ns = namespace(message='') %}
+            {% set blocked_modes = [
+              'kühlen',
+              'kuehlen',
+              'kuhlen',
+              'cool',
+              'entfeuchten',
+              'dry',
+              'auto',
+              'automatik'
+            ] %}
+
+            {% for job in jobs if ns.message == '' %}
+
+              {% set new_start = as_timestamp(job.start_at) %}
+              {% set new_end = as_timestamp(job.end_at) %}
+              {% set new_room = job.room | upper %}
+
+              {% set new_desc =
+                job.description
+                | default('')
+                | lower
+                | trim
+                | regex_replace('^reservation:\s*', '')
+              %}
+              {% set new_parts = new_desc.split() %}
+
+              {% set new_resource =
+                job.resource
+                | default(
+                    'climate'
+                    if new_parts | count > 0 and new_parts[0] == 'klima'
+                    else 'heating'
+                    if new_parts | count > 0 and new_parts[0] == 'heizung'
+                    else 'unknown',
+                    true
+                  )
+                | lower
+              %}
+
+              {% set new_mode =
+                new_parts[1]
+                if new_resource == 'climate'
+                and new_parts | count > 1
+                else ''
+              %}
+
+              {% for event in
+                calendar_data
+                .get('calendar.klima', {})
+                .get('events', [])
+                if ns.message == ''
+              %}
+
+                {% set old_room =
+                  event.location
+                  | default('')
+                  | upper
+                %}
+
+                {% set old_start = as_timestamp(event.start) %}
+                {% set old_end = as_timestamp(event.end) %}
+
+                {% if
+                  old_room == new_room
+                  and new_start < old_end
+                  and new_end > old_start
+                %}
+
+                  {% set old_desc =
+                    event.description
+                    | default('')
+                    | lower
+                    | trim
+                    | regex_replace('^reservation:\s*', '')
+                  %}
+                  {% set old_parts = old_desc.split() %}
+
+                  {% set old_resource =
+                    'climate'
+                    if old_parts | count > 0 and old_parts[0] == 'klima'
+                    else 'heating'
+                    if old_parts | count > 0 and old_parts[0] == 'heizung'
+                    else 'unknown'
+                  %}
+
+                  {% set old_mode =
+                    old_parts[1]
+                    if old_resource == 'climate'
+                    and old_parts | count > 1
+                    else ''
+                  %}
+
+                  {% set conflict =
+                    new_resource == old_resource
+                    or new_resource == 'unknown'
+                    or old_resource == 'unknown'
+                    or (
+                      new_resource != old_resource
+                      and (
+                        new_mode in blocked_modes
+                        or old_mode in blocked_modes
+                      )
+                    )
+                  %}
+
+                  {% if conflict %}
+
+                    {% set room_key = new_room | lower %}
+                    {% set room_name =
+                      rooms[room_key].name
+                      if room_key in rooms
+                      else new_room
+                    %}
+
+                    {% set ns.message = [
+                      '⚠️ Kalender-Termin kollidiert',
+                      '',
+                      room_name ~ ' ist in diesem Zeitraum bereits belegt.',
+                      '',
+                      'Bestehender Job:',
+                      (
+                        old_start
+                        | timestamp_custom(
+                            '%d.%m.%Y %H:%M',
+                            true
+                          )
+                      )
+                        ~ '–'
+                        ~ (
+                          old_end
+                          | timestamp_custom(
+                              '%H:%M',
+                              true
+                            )
+                        ),
+                      event.summary | default('Ohne Bezeichnung'),
+                      '',
+                      'Neuer Job:',
+                      (
+                        new_start
+                        | timestamp_custom(
+                            '%d.%m.%Y %H:%M',
+                            true
+                          )
+                      )
+                        ~ '–'
+                        ~ (
+                          new_end
+                          | timestamp_custom(
+                              '%H:%M',
+                              true
+                            )
+                        ),
+                      job.summary,
+                      '',
+                      'Der neue Job wurde nicht angelegt.'
+                    ] | join('\n') %}
+
+                  {% endif %}
+                {% endif %}
+              {% endfor %}
+            {% endfor %}
+
+            {{ ns.message }}
+      - if:
+          - condition: template
+            value_template: "{{ existing_collision_message | trim != '' }}"
+        then:
+          - variables:
+              response:
+                ok: false
+                collision: true
+                message: "{{ existing_collision_message }}"
+          - stop: Terminkollision
+            response_variable: response
+      - variables:
+          internal_collision_message: |-
+            {% set ns = namespace(message='') %}
+            {% set blocked_modes = [
+              'kühlen',
+              'kuehlen',
+              'kuhlen',
+              'cool',
+              'entfeuchten',
+              'dry',
+              'auto',
+              'automatik'
+            ] %}
+
+            {% for first in jobs if ns.message == '' %}
+              {% set first_index = loop.index0 %}
+              {% set first_start = as_timestamp(first.start_at) %}
+              {% set first_end = as_timestamp(first.end_at) %}
+
+              {% set first_desc =
+                first.description
+                | default('')
+                | lower
+                | trim
+                | regex_replace('^reservation:\s*', '')
+              %}
+              {% set first_parts = first_desc.split() %}
+
+              {% set first_resource =
+                first.resource
+                | default(
+                    'climate'
+                    if first_parts | count > 0 and first_parts[0] == 'klima'
+                    else 'heating'
+                    if first_parts | count > 0 and first_parts[0] == 'heizung'
+                    else 'unknown',
+                    true
+                  )
+                | lower
+              %}
+
+              {% set first_mode =
+                first_parts[1]
+                if first_resource == 'climate'
+                and first_parts | count > 1
+                else ''
+              %}
+
+              {% for second in jobs if ns.message == '' %}
+                {% set second_index = loop.index0 %}
+
+                {% if second_index > first_index %}
+
+                  {% set second_start = as_timestamp(second.start_at) %}
+                  {% set second_end = as_timestamp(second.end_at) %}
+
+                  {% if
+                    first.room | upper == second.room | upper
+                    and first_start < second_end
+                    and first_end > second_start
+                  %}
+
+                    {% set second_desc =
+                      second.description
+                      | default('')
+                      | lower
+                      | trim
+                      | regex_replace('^reservation:\s*', '')
+                    %}
+                    {% set second_parts = second_desc.split() %}
+
+                    {% set second_resource =
+                      second.resource
+                      | default(
+                          'climate'
+                          if second_parts | count > 0
+                          and second_parts[0] == 'klima'
+                          else 'heating'
+                          if second_parts | count > 0
+                          and second_parts[0] == 'heizung'
+                          else 'unknown',
+                          true
+                        )
+                      | lower
+                    %}
+
+                    {% set second_mode =
+                      second_parts[1]
+                      if second_resource == 'climate'
+                      and second_parts | count > 1
+                      else ''
+                    %}
+
+                    {% set conflict =
+                      first_resource == second_resource
+                      or first_resource == 'unknown'
+                      or second_resource == 'unknown'
+                      or (
+                        first_resource != second_resource
+                        and (
+                          first_mode in blocked_modes
+                          or second_mode in blocked_modes
+                        )
+                      )
+                    %}
+
+                    {% if conflict %}
+                      {% set ns.message = [
+                        '⚠️ Die neue Planung enthält einen Konflikt.',
+                        '',
+                        'Raum: ' ~ (first.room | upper),
+                        '',
+                        'Job 1:',
+                        (
+                          first_start
+                          | timestamp_custom(
+                              '%d.%m.%Y %H:%M',
+                              true
+                            )
+                        )
+                          ~ '–'
+                          ~ (
+                            first_end
+                            | timestamp_custom(
+                                '%H:%M',
+                                true
+                              )
+                          ),
+                        first.summary,
+                        '',
+                        'Job 2:',
+                        (
+                          second_start
+                          | timestamp_custom(
+                              '%d.%m.%Y %H:%M',
+                              true
+                            )
+                        )
+                          ~ '–'
+                          ~ (
+                            second_end
+                            | timestamp_custom(
+                                '%H:%M',
+                                true
+                              )
+                          ),
+                        second.summary,
+                        '',
+                        'Es wurde nichts angelegt.'
+                      ] | join('\n') %}
+                    {% endif %}
+
+                  {% endif %}
+                {% endif %}
+              {% endfor %}
+            {% endfor %}
+
+            {{ ns.message }}
+      - if:
+          - condition: template
+            value_template: "{{ internal_collision_message | trim != '' }}"
+        then:
+          - variables:
+              response:
+                ok: false
+                collision: true
+                message: "{{ internal_collision_message }}"
+          - stop: Interne Terminkollision
+            response_variable: response
+      - repeat:
+          for_each: "{{ jobs }}"
+          sequence:
+            - action: calendar.create_event
+              target:
+                entity_id: calendar.klima
+              data:
+                summary: "{{ repeat.item.summary }}"
+                description: "{{ repeat.item.description }}"
+                location: "{{ repeat.item.room | upper }}"
+                start_date_time: "{{ repeat.item.start_at }}"
+                end_date_time: "{{ repeat.item.end_at }}"
+      - variables:
+          response:
+            ok: true
+            collision: false
+            created: "{{ jobs | count }}"
+            message: >-
+              ✅ {{ jobs | count }} Job{{ '' if jobs | count == 1 else 's' }}
+              eingeplant.
+      - stop: Jobs angelegt
+        response_variable: response
+  - variables:
+      args: |-
+        {{
+          parts[2:]
+          if parts | count > 2
+          else []
+        }}
+      user_operation: |-
+        {% if args | count > 0
+              and args[0] in [
+                'löschen',
+                'loeschen',
+                'loschen',
+                'delete'
+              ]
+        %}
+          delete
+        {% else %}
+          list
+        {% endif %}
+      requested_filter: |-
+        {% if args | count == 0 %}
+          alle
+        {% elif args[0] in [
+          'löschen',
+          'loeschen',
+          'loschen',
+          'delete'
+        ] %}
+          alle
+        {% else %}
+          {{ args[0] }}
+        {% endif %}
+      delete_id: |-
+        {% if
+          args | count >= 2
+          and args[0] in [
+            'löschen',
+            'loeschen',
+            'loschen',
+            'delete'
+          ]
+        %}
+          {{ args[1] | upper }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+  - variables:
+      room_filter: "{{ aliases.get(requested_filter, '') }}"
+  - if:
+      - condition: template
+        value_template: "{{ user_operation == 'delete' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: |-
+              ⚠️ Das Löschen einzelner Kalendertermine ist über die
+              regulären Home-Assistant-Kalender-Actions derzeit nicht
+              verfügbar.
+
+              {% if delete_id != '' %}
+              Gewünschter Job: {{ delete_id }}
+              {% else %}
+              Beispiel:
+              klima kalender löschen AZ_1
+              {% endif %}
+      - stop: Löschen derzeit nicht verfügbar
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            requested_filter != 'alle'
+            and room_filter == ''
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: |-
+              ❌ Unbekannter Raum: {{ requested_filter }}
+
+              Beispiele:
+              klima kalender
+              klima kalender az
+              klima kalender ba
+              klima kalender wc
+      - stop: Ungültiger Raumfilter
+        response_variable: response
+  - action: calendar.get_events
+    target:
+      entity_id: calendar.klima
+    data:
+      duration:
+        days: 7
+    response_variable: calendar_data
+  - variables:
+      message: |-
+        {% set ns = namespace(
+          lines=['📅 Klima-/Heizungs-Kalender', ''],
+          seen=[],
+          found=0
+        ) %}
+
+        {% for event in
+          calendar_data
+          .get('calendar.klima', {})
+          .get('events', [])
+        %}
+
+          {% set location =
+            event.location
+            | default('')
+            | lower
+          %}
+
+          {% set room_key =
+            aliases.get(location, location)
+          %}
+
+          {% if
+            room_key in rooms
+            and room_key != 'extern'
+            and (
+              room_filter in ['', 'alle']
+              or room_filter == room_key
+            )
+          %}
+
+            {% set ns.seen = ns.seen + [room_key] %}
+            {% set job_number =
+              ns.seen
+              | select('equalto', room_key)
+              | list
+              | count
+            %}
+
+            {% set job_id =
+              room_key | upper
+              ~ '_'
+              ~ job_number
+            %}
+
+            {% set ns.found = ns.found + 1 %}
+
+            {% set start_ts =
+              as_timestamp(event.start)
+            %}
+
+            {% set end_ts =
+              as_timestamp(event.end)
+            %}
+
+            {% set duration_seconds =
+              end_ts - start_ts
+            %}
+
+            {% set ns.lines =
+              ns.lines
+              + [
+                job_id,
+                (
+                  start_ts
+                  | timestamp_custom(
+                      '%d.%m.%Y %H:%M',
+                      true
+                    )
+                )
+                  ~ (
+                    '–'
+                    ~ (
+                      end_ts
+                      | timestamp_custom(
+                          '%H:%M',
+                          true
+                        )
+                    )
+                    if duration_seconds > 60
+                    else ''
+                  ),
+                rooms[room_key].name
+                  ~ ' → '
+                  ~ (
+                    event.summary
+                    | default('')
+                  ),
+                ''
+              ]
+            %}
+
+          {% endif %}
+        {% endfor %}
+
+        {% if ns.found == 0 %}
+          {% set ns.lines =
+            ns.lines
+            + [
+              'Keine geplanten Klima- oder Heizungs-Jobs gefunden.'
+            ]
+          %}
+        {% else %}
+          {% set ns.lines = ns.lines[:-1] %}
+        {% endif %}
+
+        {{ ns.lines | join('\n') }}
+      response:
+        ok: true
+        message: "{{ message }}"
+  - stop: Kalender erstellt
+    response_variable: response
+mode: queued
+max: 20

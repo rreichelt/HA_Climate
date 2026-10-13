@@ -1,0 +1,45 @@
+name: Fehlerbericht
+description: Reproduzierbaren Fehler in Skripten, Automationen oder Dokumentation melden
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Danke für den Bericht. Entferne vor dem Absenden Tokens, Chat-/User-IDs, private URLs und andere vertrauliche Daten.
+  - type: input
+    id: home_assistant_version
+    attributes:
+      label: Home-Assistant-Version
+      description: Core-Version und Installationsmethode
+      placeholder: "Core 2026.x.y, Home Assistant Container"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Fehlerbeschreibung
+      description: Was ist passiert und was wurde erwartet?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduktion
+      description: Minimale Schritte und verwendeter Befehl mit anonymisierten Werten
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs oder Trace
+      description: Optional; ausschließlich bereinigte relevante Ausschnitte
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Datenschutzprüfung
+      options:
+        - label: Ich habe Tokens, IDs und andere vertrauliche Daten entfernt.
+          required: true

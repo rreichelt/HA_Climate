@@ -1,0 +1,186 @@
+alias: Klima - Scheduler
+description: >
+  Prüft calendar.klima jede Minute und führt genau in dieser Minute startende
+  Klima- und Heizungs-Jobs aus.
+triggers:
+  - trigger: time_pattern
+    minutes: /1
+conditions: []
+actions:
+  - action: script.system_raum_mapping
+    response_variable: mapping
+  - variables:
+      rooms: "{{ mapping.rooms }}"
+      aliases: "{{ mapping.aliases }}"
+      window_start: |-
+        {{
+          now()
+          .replace(second=0, microsecond=0)
+          .strftime('%Y-%m-%d %H:%M:%S')
+        }}
+      window_end: |-
+        {{
+          (
+            now()
+            .replace(second=0, microsecond=0)
+            + timedelta(minutes=1)
+          )
+          .strftime('%Y-%m-%d %H:%M:%S')
+        }}
+  - action: calendar.get_events
+    target:
+      entity_id: calendar.klima
+    data:
+      start_date_time: "{{ window_start }}"
+      end_date_time: "{{ window_end }}"
+    response_variable: calendar_data
+  - repeat:
+      for_each: |-
+        {{
+          calendar_data
+          .get('calendar.klima', {})
+          .get('events', [])
+        }}
+      sequence:
+        - variables:
+            description: |-
+              {{
+                repeat.item.description
+                | default('')
+                | trim
+              }}
+            description_normalized: |-
+              {{
+                repeat.item.description
+                | default('')
+                | trim
+                | lower
+              }}
+            location: |-
+              {{
+                repeat.item.location
+                | default('')
+                | trim
+                | lower
+              }}
+            event_start: "{{ repeat.item.start }}"
+            event_end: "{{ repeat.item.end }}"
+        - variables:
+            command_type: |-
+              {% if description_normalized | regex_match('^klima\s+') %}
+                climate
+              {% elif description_normalized | regex_match('^heizung\s+') %}
+                heating
+              {% else %}
+                ignore
+              {% endif %}
+            room_key: "{{ aliases.get(location, location) }}"
+            room_name: |-
+              {% if room_key in rooms %}
+                {{ rooms[room_key].name }}
+              {% else %}
+                {{
+                  repeat.item.location
+                  | default('Unbekannter Raum')
+                }}
+              {% endif %}
+            starts_in_this_minute: |-
+              {{
+                as_timestamp(event_start)
+                >= as_timestamp(window_start)
+                and
+                as_timestamp(event_start)
+                < as_timestamp(window_end)
+              }}
+            event_duration_seconds: |-
+              {{
+                as_timestamp(event_end)
+                - as_timestamp(event_start)
+              }}
+        - if:
+            - condition: template
+              value_template: |-
+                {{
+                  starts_in_this_minute | bool
+                  and command_type != 'ignore'
+                }}
+          then:
+            - choose:
+                - conditions:
+                    - condition: template
+                      value_template: "{{ command_type == 'climate' }}"
+                  sequence:
+                    - action: script.klima_steuerung
+                      data:
+                        command: "{{ description }}"
+                      response_variable: job_response
+                - conditions:
+                    - condition: template
+                      value_template: "{{ command_type == 'heating' }}"
+                  sequence:
+                    - action: script.heizung_steuerung
+                      data:
+                        command: "{{ description }}"
+                        acknowledge: false
+                      response_variable: job_response
+            - if:
+                - condition: template
+                  value_template: |-
+                    {{
+                      job_response.ok
+                      | default(false)
+                      | bool
+                    }}
+                - condition: state
+                  entity_id: input_boolean.klima_scheduler_notifications
+                  state: "on"
+              then:
+                - action: script.system_nachricht
+                  data:
+                    message: >-
+                      ▶️ {% if command_type == 'heating' %}Heizungs{% else
+                      %}Klima{% endif %}-Job gestartet
+
+
+                      {{ room_name }}
+
+                      {{ repeat.item.summary | default(description) }}
+
+                      {% if event_duration_seconds | float > 60 %}
+
+                      Geplant: {{
+                      as_local(as_datetime(event_start)).strftime('%H:%M') }}–{{
+                      as_local(as_datetime(event_end)).strftime('%H:%M') }}
+
+                      {% else %}
+
+                      Geplant: {{
+                      as_local(as_datetime(event_start)).strftime('%H:%M') }}
+
+                      {% endif %}
+            - if:
+                - condition: template
+                  value_template: |-
+                    {{
+                      not (
+                        job_response.ok
+                        | default(false)
+                        | bool
+                      )
+                    }}
+              then:
+                - action: script.system_nachricht
+                  data:
+                    message: >-
+                      ❌ {% if command_type == 'heating' %}Heizungs{% else
+                      %}Klima{% endif %}-Job konnte nicht ausgeführt werden
+
+
+                      {{ room_name }}
+
+                      {{ repeat.item.summary | default(description) }}
+
+
+                      {{ job_response.message | default('Unbekannter Fehler') }}
+mode: queued
+max: 10

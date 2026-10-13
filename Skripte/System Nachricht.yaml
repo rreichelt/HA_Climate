@@ -1,0 +1,81 @@
+alias: System - Nachricht
+description: >
+  Zentrale messengerunabhängige Ausgabe asynchroner Systemnachrichten. Wählt den
+  Messenger aus und delegiert den Versand an den jeweiligen Ausgangsadapter.
+fields:
+  message:
+    name: Nachricht
+    description: Zu sendender Nachrichtentext
+    required: true
+  messenger:
+    name: Messenger
+    description: telegram, threema oder all
+    required: false
+    default: telegram
+  target:
+    name: Ziel
+    description: >
+      Optionales messenger-spezifisches Ziel. Ohne Angabe verwendet der
+      jeweilige Ausgangsadapter sein Standardziel.
+    required: false
+sequence:
+  - variables:
+      selected_messenger: |-
+        {{
+          messenger
+          | default('telegram', true)
+          | string
+          | trim
+          | lower
+        }}
+      selected_target: |-
+        {{
+          target
+          | default('', true)
+        }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ selected_messenger == 'telegram' }}"
+        sequence:
+          - action: script.telegram_ausgang
+            data:
+              message: "{{ message }}"
+              target: "{{ selected_target }}"
+            response_variable: messenger_response
+      - conditions:
+          - condition: template
+            value_template: "{{ selected_messenger == 'threema' }}"
+        sequence:
+          - variables:
+              response:
+                ok: false
+                messenger: threema
+                message: ❌ Messenger „threema“ ist noch nicht konfiguriert.
+          - stop: Threema noch nicht konfiguriert
+            response_variable: response
+      - conditions:
+          - condition: template
+            value_template: "{{ selected_messenger == 'all' }}"
+        sequence:
+          - action: script.telegram_ausgang
+            data:
+              message: "{{ message }}"
+              target: "{{ selected_target }}"
+            response_variable: telegram_response
+    default:
+      - variables:
+          response:
+            ok: false
+            messenger: "{{ selected_messenger }}"
+            message: "❌ Unbekannter Messenger: {{ selected_messenger }}"
+      - stop: Unbekannter Messenger
+        response_variable: response
+  - variables:
+      response:
+        ok: true
+        messenger: "{{ selected_messenger }}"
+  - stop: Nachricht versendet
+    response_variable: response
+mode: queued
+max: 20

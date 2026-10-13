@@ -1,0 +1,97 @@
+alias: Klima - Status
+description: Liefert Klimadaten eines Raums oder aller Räume
+fields:
+  target:
+    name: Ziel
+    description: Raumkürzel, Alias oder alle
+    required: false
+    default: alle
+sequence:
+  - action: script.system_raum_mapping
+    response_variable: mapping
+  - variables:
+      rooms: "{{ mapping.rooms }}"
+      aliases: "{{ mapping.aliases }}"
+      config: "{{ mapping.config }}"
+      requested: "{{ target | default('alle') | trim | lower }}"
+      room_key: "{{ aliases.get(requested, '') }}"
+      room_keys: |-
+        {% if room_key == 'alle' %}
+          {{ ['extern', 'az', 'wz', 'sz', 'ku', 'ba', 'wc'] }}
+        {% elif room_key in rooms %}
+          {{ [room_key] }}
+        {% else %}
+          {{ [] }}
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ room_keys | count == 0 }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Unbekannter Raum: {{ requested }}"
+      - stop: Unbekannter Raum
+        response_variable: response
+  - variables:
+      message: |-
+        {% set ns = namespace(lines=['🌡 Klima H3-4', '']) %}
+
+        {% for key in room_keys %}
+          {% set room = rooms[key] %}
+
+          {% set temp_state = states(room.temperature) %}
+          {% set temp_unit = state_attr(room.temperature, 'unit_of_measurement') or '' %}
+
+          {% set hum_state = states(room.humidity) %}
+          {% set hum_unit = state_attr(room.humidity, 'unit_of_measurement') or '' %}
+
+          {% set ns.lines = ns.lines + [
+            room.icon ~ ' ' ~ room.name,
+            '• Temperatur: ' ~ temp_state ~ ' ' ~ temp_unit,
+            '• Luftfeuchtigkeit: ' ~ hum_state ~ ' ' ~ hum_unit
+          ] %}
+
+          {% if key == 'extern' %}
+            {% set wind_state = states(room.wind) %}
+            {% set wind_unit = state_attr(room.wind, 'unit_of_measurement') or '' %}
+            {% set rain_state = is_state(room.rain, 'on') %}
+
+            {% set ns.lines = ns.lines + [
+              '• Wind: ' ~ wind_state ~ ' ' ~ wind_unit,
+              '• Regen: ' ~ ('Ja' if rain_state else 'Nein')
+            ] %}
+          {% endif %}
+
+          {% if room.climate %}
+            {% set hvac = states(room.climate) %}
+            {% set hvac_label = config.climate.hvac_labels.get(hvac, hvac) %}
+
+            {% set ns.lines = ns.lines + [
+              '• Klimaanlage: ' ~ hvac_label
+            ] %}
+
+            {% if hvac in ['heat', 'cool', 'auto'] %}
+              {% set target_temp = state_attr(room.climate, 'temperature') %}
+              {% if target_temp is not none %}
+                {% set ns.lines = ns.lines + [
+                  '• Zieltemperatur: ' ~ target_temp ~ ' °C'
+                ] %}
+              {% endif %}
+            {% endif %}
+          {% endif %}
+
+          {% if not loop.last %}
+            {% set ns.lines = ns.lines + [''] %}
+          {% endif %}
+        {% endfor %}
+
+        {{ ns.lines | join('\n') }}
+      response:
+        ok: true
+        target: "{{ room_key }}"
+        message: "{{ message }}"
+  - stop: Klimastatus erstellt
+    response_variable: response
+mode: parallel
+max: 20

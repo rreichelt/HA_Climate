@@ -1,0 +1,158 @@
+alias: System - Raum-Mapping
+description: Zentrale Definition der Räume und systemweiten Raumparameter
+sequence:
+  - variables:
+      response:
+        config:
+          climate:
+            calendar: calendar.klima
+            default_time_mode: start
+            timed_default_fan_mode: superhigh
+            hvac_aliases:
+              kühlen: cool
+              kuehlen: cool
+              kuhlen: cool
+              cool: cool
+              heizen: heat
+              heat: heat
+              lüften: fan_only
+              lueften: fan_only
+              luften: fan_only
+              fan: fan_only
+              fan_only: fan_only
+              entfeuchten: dry
+              dry: dry
+              auto: auto
+              automatik: auto
+              aus: "off"
+              "off": "off"
+            hvac_labels:
+              "off": Aus
+              auto: Automatik
+              cool: Kühlen
+              heat: Heizen
+              dry: Entfeuchten
+              fan_only: Nur Lüftung
+            fan_aliases:
+              silent: silent
+              leise: silent
+              low: low
+              niedrig: low
+              med: med
+              mittel: med
+              high: high
+              hoch: high
+              max: superhigh
+              maximum: superhigh
+              superhigh: superhigh
+              auto: auto
+              automatik: auto
+            fan_labels:
+              silent: Leise
+              low: Niedrig
+              med: Mittel
+              high: Hoch
+              superhigh: Max
+              auto: Automatik
+          heating:
+            calendar: calendar.klima
+        rooms:
+          az:
+            name: Arbeitszimmer
+            icon: 🖥
+            temperature: sensor.climacontrol_arbeitszimmer_sensor_temperatur
+            humidity: sensor.climacontrol_arbeitszimmer_sensor_feuchtigkeit
+            climate: climate.climacontrol_arbeitszimmer_climate
+            systems:
+              climate:
+                entity: climate.climacontrol_arbeitszimmer_climate
+              heating:
+                entity: climate.arbeitszimmer_heizung_az
+          wz:
+            name: Wohnzimmer
+            icon: 🛋
+            temperature: sensor.climacontrol_wohnzimmer_sensor_temperatur
+            humidity: sensor.climacontrol_wohnzimmer_sensor_feuchtigkeit
+            climate: climate.climacontrol_wohnzimmer_climate
+            systems:
+              climate:
+                entity: climate.climacontrol_wohnzimmer_climate
+              heating:
+                entity: climate.wohnzimmer_heizung_wz
+          sz:
+            name: Schlafzimmer
+            icon: 🛏
+            temperature: sensor.climacontrol_schlafzimmer_sensor_temperatur
+            humidity: sensor.climacontrol_schlafzimmer_sensor_feuchtigkeit
+            climate: climate.climacontrol_schlafzimmer_climate
+            systems:
+              climate:
+                entity: climate.climacontrol_schlafzimmer_climate
+              heating:
+                entity: climate.schlafzimmer_heizung_sz
+          ku:
+            name: Küche
+            icon: 🍳
+            temperature: sensor.climacontrol_kueche_sensor_temperatur
+            humidity: sensor.climacontrol_kueche_sensor_feuchtigkeit
+            climate: climate.climacontrol_kueche_climate
+            systems:
+              climate:
+                entity: climate.climacontrol_kueche_climate
+              heating:
+                entity: climate.kueche_heizung_ku
+          ba:
+            name: Bad
+            icon: 🚿
+            temperature: sensor.badezimmer_temperatursensor_bad_temperatur
+            humidity: sensor.badezimmer_temperatursensor_bad_luftfeuchtigkeit
+            climate: null
+            systems:
+              climate:
+                entity: null
+              heating:
+                entity: climate.badezimmer_heizung_ba
+          wc:
+            name: WC
+            icon: 🚽
+            temperature: sensor.badezimmer_temperatursensor_wc_temperatur
+            humidity: sensor.badezimmer_temperatursensor_wc_luftfeuchtigkeit
+            climate: null
+            systems:
+              climate:
+                entity: null
+              heating:
+                entity: climate.badezimmer_heizung_wc
+          extern:
+            name: Extern
+            icon: 🌦
+            temperature: sensor.balkon_vorn_gw2000a_outdoor_temperature
+            humidity: sensor.balkon_vorn_gw2000a_humidity
+            climate: null
+            wind: sensor.balkon_vorn_gw2000a_wind_speed
+            rain: binary_sensor.balkon_vorn_gw2000a_rain_state_piezo
+        aliases:
+          alle: alle
+          all: alle
+          az: az
+          arbeitszimmer: az
+          wz: wz
+          wohnzimmer: wz
+          sz: sz
+          schlafzimmer: sz
+          ku: ku
+          küche: ku
+          kueche: ku
+          kuche: ku
+          ba: ba
+          bad: ba
+          badezimmer: ba
+          wc: wc
+          extern: extern
+          außen: extern
+          aussen: extern
+          outdoor: extern
+  - stop: Raum-Mapping erstellt
+    response_variable: response
+mode: parallel
+max: 20

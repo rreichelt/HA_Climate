@@ -1,0 +1,134 @@
+alias: System - Message-Router
+description: |
+  Zentrale messengerunabhängige Verteilung eingehender Benutzerbefehle.
+fields:
+  command:
+    name: Befehl
+    description: Normalisierter Benutzerbefehl
+    required: true
+sequence:
+  - variables:
+      cmd: |-
+        {{
+          command
+          | default('')
+          | string
+          | trim
+          | lower
+          | regex_replace('^/', '')
+          | trim
+        }}
+      parts: "{{ cmd.split() }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{
+                cmd == 'status'
+                or cmd.startswith('status ')
+              }}
+        sequence:
+          - action: script.system_status
+            data:
+              command: "{{ cmd }}"
+            response_variable: response
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{
+                cmd == 'klima'
+                or cmd.startswith('klima ')
+              }}
+        sequence:
+          - action: script.klima_router
+            data:
+              command: "{{ cmd }}"
+            response_variable: response
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{
+                cmd == 'heizung'
+                or cmd.startswith('heizung ')
+              }}
+        sequence:
+          - action: script.heizung_steuerung
+            data:
+              command: "{{ cmd }}"
+            response_variable: response
+      - conditions:
+          - condition: template
+            value_template: "{{ cmd in ['hilfe', 'help'] }}"
+        sequence:
+          - variables:
+              response:
+                ok: true
+                message: |-
+                  🤖 H3-4 Bot
+
+                  STATUS
+
+                  status
+                  status detail
+
+
+                  KLIMA
+
+                  klima
+                  klima status
+                  klima status az
+                  klima status extern
+                  klima kalender
+
+                  Steuerung:
+                  klima kühlen az 24
+                  klima kühlen az 24 max
+                  klima heizen wz 22
+                  klima lüften sz auto
+                  klima entfeuchten ku
+                  klima aus az
+
+                  Ohne Raum = alle Klimageräte:
+                  klima kühlen 24
+                  klima heizen 22
+
+                  Zeitsteuerung:
+                  klima kühlen az 24 ab 18 Uhr
+                  klima kühlen az 24 bis 20 Uhr
+                  klima kühlen az 24 18 bis 20 Uhr
+                  klima kühlen az 24 morgen 18 bis 20 Uhr
+                  klima kühlen az 24 für 30min danach aus
+
+                  Bad / WC:
+                  klima heizen ba 23
+                  klima heizen wc 22
+                  → verwendet den Heizkörper
+
+
+                  HEIZUNG
+
+                  heizung az 22
+                  heizung ba 23
+                  heizung wc 22
+                  heizung az aus
+
+                  Zeitsteuerung:
+                  heizung az 22 ab 18 Uhr
+                  heizung az 22 bis 20 Uhr
+                  heizung az 22 18 bis 20 Uhr
+                  heizung az 22 morgen 18 bis 20 Uhr
+                  heizung az 22 für 2h danach aus
+
+                  „aus“ = 4 °C Frostschutz
+    default:
+      - variables:
+          response:
+            ok: false
+            message: |-
+              ❓ Unbekannter Befehl: {{ cmd }}
+
+              Schreibe „hilfe“ für die verfügbaren Befehle.
+  - stop: Befehl verarbeitet
+    response_variable: response
+mode: queued
+max: 20

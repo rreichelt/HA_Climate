@@ -1,0 +1,81 @@
+alias: Klima - Router
+description: Verteilt Klimabefehle auf Status, Kalender und Steuerung
+fields:
+  command:
+    name: Befehl
+    required: true
+sequence:
+  - variables:
+      cmd: |-
+        {{ command
+           | default('')
+           | trim
+           | lower
+           | regex_replace('^/', '')
+           | trim }}
+      parts: "{{ cmd.split() }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ cmd == 'klima' }}"
+        sequence:
+          - action: script.klima_status
+            data:
+              target: alle
+            response_variable: response
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{ parts | count >= 2
+                 and parts[0] == 'klima'
+                 and parts[1] == 'status' }}
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ parts | count == 2 }}"
+                sequence:
+                  - action: script.klima_status
+                    data:
+                      target: alle
+                    response_variable: response
+              - conditions:
+                  - condition: template
+                    value_template: "{{ parts | count == 3 }}"
+                sequence:
+                  - action: script.klima_status
+                    data:
+                      target: "{{ parts[2] }}"
+                    response_variable: response
+            default:
+              - variables:
+                  response:
+                    ok: false
+                    message: |-
+                      ❌ Ungültiger Status-Befehl.
+
+                      Beispiele:
+                      klima
+                      klima status
+                      klima status az
+                      klima status extern
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{ parts | count >= 2
+                 and parts[0] == 'klima'
+                 and parts[1] == 'kalender' }}
+        sequence:
+          - action: script.klima_kalender
+            data:
+              command: "{{ cmd }}"
+            response_variable: response
+    default:
+      - action: script.klima_steuerung
+        data:
+          command: "{{ cmd }}"
+        response_variable: response
+  - stop: Klimabefehl verarbeitet
+    response_variable: response
+mode: queued
+max: 20

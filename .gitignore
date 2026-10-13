@@ -1,0 +1,37 @@
+# Interne, nicht zu veröffentlichende Übergabedokumentation
+Dokumentation/HANDOFF.md
+
+# Nichtproduktiver, vorerst nicht veröffentlichter Kalenderadapter-Spike
+Spike/
+Dokumentation/SPIKE_KALENDERADAPTER.md
+Dokumentation/Testergebnisse/
+
+# Der aktuelle öffentliche Stand benötigt keine Beispiel-Secret-Datei
+secrets.example.yaml
+
+# Home-Assistant-Geheimnisse und lokale Zugangsdaten
+secrets.yaml
+*.secret.yaml
+credentials.yaml
+*.credentials.yaml
+local_credentials*
+
+# Umgebungsdateien
+.env
+.env.*
+
+# Python-Testartefakte
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+
+# Private Schlüssel und Zertifikats-Schlüssel
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*

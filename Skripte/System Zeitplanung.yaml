@@ -1,0 +1,898 @@
+alias: System - Zeitplanung
+description: >
+  Trennt einen Fachbefehl von seiner Zeitplanung und wertet Datum, Startzeit,
+  Endzeit, Dauer und Folgeaktion aus. Kennt keine Klima-, Heizungs-, Raum- oder
+  Gerätesemantik.
+fields:
+  text:
+    name: Text
+    description: Fachbefehl inklusive optionaler Zeitplanung
+    required: true
+sequence:
+  - variables:
+      input: |-
+        {{
+          text
+          | default('', true)
+          | string
+          | trim
+          | lower
+        }}
+  - if:
+      - condition: template
+        value_template: "{{ input == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Leerer Befehl.
+      - stop: Leerer Befehl
+        response_variable: response
+  - variables:
+      before_after: |-
+        {{
+          input.split(' danach ', 1)[0] | trim
+          if ' danach ' in input
+          else input
+        }}
+      explicit_after: |-
+        {{
+          input.split(' danach ', 1)[1] | trim
+          if ' danach ' in input
+          else ''
+        }}
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            ' danach ' in input
+            and explicit_after == ''
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Nach „danach“ fehlt die Folgeaktion.
+      - stop: Folgeaktion fehlt
+        response_variable: response
+  - variables:
+      tokens: "{{ before_after.split() }}"
+      date_words:
+        - heute
+        - morgen
+        - übermorgen
+        - uebermorgen
+        - montag
+        - mo
+        - dienstag
+        - di
+        - mittwoch
+        - mi
+        - donnerstag
+        - do
+        - freitag
+        - fr
+        - samstag
+        - sa
+        - sonntag
+        - so
+  - variables:
+      planning_index: |-
+        {% set ns = namespace(index=-1) %}
+        {% for token in tokens %}
+          {% if ns.index == -1 %}
+            {% if
+              token in ['ab', 'bis', 'von', 'für']
+              or token in date_words
+              or token | regex_match('^[0-9]{1,2}\.[0-9]{1,2}\.$')
+              or token | regex_match('^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{4}$')
+              or token | regex_match('^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$')
+            %}
+              {% set ns.index = loop.index0 %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.index }}
+  - variables:
+      action: |-
+        {% if planning_index | int == -1 %}
+          {{ before_after }}
+        {% else %}
+          {{ tokens[:planning_index | int] | join(' ') | trim }}
+        {% endif %}
+      planning_text: |-
+        {% if planning_index | int == -1 %}
+          {{ '' }}
+        {% else %}
+          {{ tokens[planning_index | int:] | join(' ') | trim }}
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ action == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Fachbefehl fehlt.
+      - stop: Fachbefehl fehlt
+        response_variable: response
+  - variables:
+      timing_part: |-
+        {{
+          planning_text.split(' für ', 1)[0] | trim
+          if ' für ' in planning_text
+          else (
+            ''
+            if planning_text.startswith('für ')
+            else planning_text
+          )
+        }}
+      duration_text: |-
+        {% if planning_text.startswith('für ') %}
+          {{ planning_text[4:] | trim }}
+        {% elif ' für ' in planning_text %}
+          {{ planning_text.split(' für ', 1)[1] | trim }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+  - variables:
+      duration_minutes: >-
+        {% set value = duration_text | trim %} {% set ns = namespace(minutes=0)
+        %}
+
+        {% if value != '' %}
+
+          {% set hours =
+            value
+            | regex_findall(
+                '^([0-9]+(?:[\.,][0-9]+)?)\s*h$'
+              )
+          %}
+
+          {% set minutes =
+            value
+            | regex_findall(
+                '^([0-9]+)\s*(?:min|m)$'
+              )
+          %}
+
+          {% if hours | count > 0 %}
+            {% set ns.minutes =
+              (
+                (hours[0] | replace(',', '.') | float) * 60
+              )
+              | round(0)
+              | int
+            %}
+          {% elif minutes | count > 0 %}
+            {% set ns.minutes = minutes[0] | int %}
+          {% else %}
+            {% set ns.minutes = -1 %}
+          {% endif %}
+
+        {% endif %}
+
+        {{ ns.minutes }}
+  - if:
+      - condition: template
+        value_template: "{{ duration_minutes | int < 0 }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Dauer nicht verstanden: {{ duration_text }}"
+      - stop: Ungültige Dauer
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            duration_text != ''
+            and duration_minutes | int <= 0
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Die Dauer muss größer als 0 Minuten sein.
+      - stop: Ungültige Dauer
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            duration_minutes | int > 0
+            and explicit_after == ''
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: |-
+              ❌ „für“ benötigt eine Folgeaktion.
+
+              Beispiel:
+              für 30min danach aus
+      - stop: Folgeaktion fehlt
+        response_variable: response
+  - variables:
+      timing_tokens: "{{ timing_part.split() }}"
+      date_aliases:
+        heute: today
+        morgen: tomorrow
+        übermorgen: day_after
+        uebermorgen: day_after
+        montag: wd_0
+        mo: wd_0
+        dienstag: wd_1
+        di: wd_1
+        mittwoch: wd_2
+        mi: wd_2
+        donnerstag: wd_3
+        do: wd_3
+        freitag: wd_4
+        fr: wd_4
+        samstag: wd_5
+        sa: wd_5
+        sonntag: wd_6
+        so: wd_6
+  - variables:
+      first_timing_token: |-
+        {{
+          timing_tokens[0]
+          if timing_tokens | count > 0
+          else ''
+        }}
+      has_date: |-
+        {{
+          first_timing_token in date_aliases
+          or first_timing_token
+             | regex_match('^[0-9]{1,2}\.[0-9]{1,2}\.$')
+          or first_timing_token
+             | regex_match('^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{4}$')
+          or first_timing_token
+             | regex_match('^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$')
+        }}
+      date_token: |-
+        {{
+          first_timing_token
+          if has_date
+          else ''
+        }}
+  - variables:
+      date_type: |-
+        {% if not has_date %}
+          none
+        {% elif date_token in date_aliases %}
+          {{ date_aliases[date_token] }}
+        {% elif
+          date_token
+          | regex_match('^[0-9]{1,2}\.[0-9]{1,2}\.$')
+        %}
+          month_day
+        {% else %}
+          absolute
+        {% endif %}
+      clock_part: |-
+        {% if has_date %}
+          {{ timing_tokens[1:] | join(' ') | trim }}
+        {% else %}
+          {{ timing_part }}
+        {% endif %}
+  - variables:
+      requested_date: |-
+        {% set today = now().strftime('%Y-%m-%d') %}
+        {% if date_type == 'none' %}
+
+          {{ '' }}
+
+        {% elif date_type == 'today' %}
+
+          {{ today }}
+
+        {% elif date_type == 'tomorrow' %}
+
+          {{
+            (now() + timedelta(days=1))
+            .strftime('%Y-%m-%d')
+          }}
+
+        {% elif date_type == 'day_after' %}
+
+          {{
+            (now() + timedelta(days=2))
+            .strftime('%Y-%m-%d')
+          }}
+
+        {% elif date_type.startswith('wd_') %}
+
+          {% set wanted = date_type.split('_')[1] | int %}
+          {% set delta = (wanted - now().weekday()) % 7 %}
+
+          {{
+            (now() + timedelta(days=delta))
+            .strftime('%Y-%m-%d')
+          }}
+
+        {% elif date_type == 'month_day' %}
+
+          {% set p = date_token.split('.') %}
+          {% set day = p[0] | int %}
+          {% set month = p[1] | int %}
+          {% set ns = namespace(result='') %}
+
+          {% for year in range(now().year, now().year + 10) %}
+            {% if ns.result == '' %}
+
+              {% set candidate =
+                '%04d-%02d-%02d'
+                | format(year, month, day)
+              %}
+
+              {% if
+                as_datetime(candidate ~ ' 00:00:00', none) is not none
+                and candidate >= today
+              %}
+                {% set ns.result = candidate %}
+              {% endif %}
+
+            {% endif %}
+          {% endfor %}
+
+          {{ ns.result }}
+
+        {% else %}
+
+          {% if '-' in date_token %}
+
+            {% set p = date_token.split('-') %}
+
+            {% set candidate =
+              '%04d-%02d-%02d'
+              | format(
+                  p[0] | int,
+                  p[1] | int,
+                  p[2] | int
+                )
+            %}
+
+          {% else %}
+
+            {% set p = date_token.split('.') %}
+
+            {% set candidate =
+              '%04d-%02d-%02d'
+              | format(
+                  p[2] | int,
+                  p[1] | int,
+                  p[0] | int
+                )
+            %}
+
+          {% endif %}
+
+          {% if
+            as_datetime(candidate ~ ' 00:00:00', none)
+            is not none
+          %}
+            {{ candidate }}
+          {% else %}
+            {{ '' }}
+          {% endif %}
+
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ has_date and requested_date == '' }}"
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Ungültiges Datum: {{ date_token }}"
+      - stop: Ungültiges Datum
+        response_variable: response
+  - variables:
+      start_match: |-
+        {{
+          clock_part
+          | regex_findall(
+              '^ab\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(?:uhr)?$'
+            )
+        }}
+      until_match: |-
+        {{
+          clock_part
+          | regex_findall(
+              '^bis\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(?:uhr)?$'
+            )
+        }}
+      range_match: |-
+        {{
+          clock_part
+          | regex_findall(
+              '^von\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(?:uhr)?\s+bis\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(?:uhr)?$'
+            )
+        }}
+  - variables:
+      time_mode: |-
+        {% if range_match | count > 0 %}
+          range
+        {% elif until_match | count > 0 %}
+          until
+        {% elif start_match | count > 0 %}
+          start
+        {% else %}
+          none
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            clock_part != ''
+            and time_mode == 'none'
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: "❌ Zeitangabe nicht verstanden: {{ clock_part }}"
+      - stop: Zeitangabe nicht verstanden
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            has_date
+            and time_mode == 'none'
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Zum Datum {{ date_token }} fehlt eine Startzeit.
+      - stop: Datum ohne Uhrzeit
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            time_mode == 'until'
+            and has_date
+            and date_type != 'today'
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: >-
+              ❌ „bis“ beginnt sofort und kann nicht mit einem zukünftigen Datum
+              kombiniert werden.
+      - stop: Bis mit Zukunftsdatum
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            time_mode in ['range', 'until']
+            and duration_minutes | int > 0
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ „von … bis …“ bzw. „bis“ kann nicht mit „für“ kombiniert werden.
+      - stop: Unvereinbare Zeitangaben
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            explicit_after != ''
+            and duration_minutes | int == 0
+            and time_mode not in ['range', 'until']
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Für „danach“ fehlt ein definierter Endzeitpunkt.
+      - stop: Kein Endzeitpunkt
+        response_variable: response
+  - variables:
+      start_hour: |-
+        {% if time_mode == 'range' %}
+          {{ range_match[0][0] | int }}
+        {% elif time_mode == 'start' %}
+          {{ start_match[0][0] | int }}
+        {% elif time_mode == 'until' %}
+          {{ until_match[0][0] | int }}
+        {% else %}
+          -1
+        {% endif %}
+      start_minute: |-
+        {% if time_mode == 'range' %}
+          {{
+            range_match[0][1] | int
+            if range_match[0][1] != ''
+            else 0
+          }}
+        {% elif time_mode == 'start' %}
+          {{
+            start_match[0][1] | int
+            if start_match[0][1] != ''
+            else 0
+          }}
+        {% elif time_mode == 'until' %}
+          {{
+            until_match[0][1] | int
+            if until_match[0][1] != ''
+            else 0
+          }}
+        {% else %}
+          -1
+        {% endif %}
+      end_hour: |-
+        {% if time_mode == 'range' %}
+          {{ range_match[0][2] | int }}
+        {% else %}
+          -1
+        {% endif %}
+      end_minute: |-
+        {% if time_mode == 'range' %}
+          {{
+            range_match[0][3] | int
+            if range_match[0][3] != ''
+            else 0
+          }}
+        {% else %}
+          -1
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            time_mode in ['start', 'until', 'range']
+            and (
+              start_hour | int < 0
+              or start_hour | int > 23
+              or start_minute | int < 0
+              or start_minute | int > 59
+            )
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Ungültige Uhrzeit.
+      - stop: Ungültige Uhrzeit
+        response_variable: response
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            time_mode == 'range'
+            and (
+              end_hour | int < 0
+              or end_hour | int > 23
+              or end_minute | int < 0
+              or end_minute | int > 59
+            )
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Ungültige Endzeit.
+      - stop: Ungültige Endzeit
+        response_variable: response
+  - variables:
+      after: |-
+        {% if explicit_after != '' %}
+          {{ explicit_after }}
+        {% elif time_mode in ['range', 'until'] %}
+          aus
+        {% else %}
+          {{ '' }}
+        {% endif %}
+  - variables:
+      base_date: |-
+        {{
+          requested_date
+          if requested_date != ''
+          else now().strftime('%Y-%m-%d')
+        }}
+      nominal_start: |-
+        {% if time_mode in ['start', 'range'] %}
+          {{
+            base_date
+            ~ ' '
+            ~ (
+              '%02d:%02d:00'
+              | format(
+                  start_hour | int,
+                  start_minute | int
+                )
+            )
+          }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+  - variables:
+      scheduled_start: |-
+        {% if time_mode not in ['start', 'range'] %}
+
+          {{ '' }}
+
+        {% elif
+          as_timestamp(nominal_start)
+          > as_timestamp(now())
+        %}
+
+          {{ nominal_start }}
+
+        {% elif date_type == 'none' %}
+
+          {{
+            (
+              as_datetime(nominal_start)
+              + timedelta(days=1)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+          }}
+
+        {% elif date_type.startswith('wd_') %}
+
+          {{
+            (
+              as_datetime(nominal_start)
+              + timedelta(days=7)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+          }}
+
+        {% elif date_type == 'month_day' %}
+
+          {% set p = date_token.split('.') %}
+          {% set day = p[0] | int %}
+          {% set month = p[1] | int %}
+          {% set ns = namespace(result='') %}
+
+          {% for year in range(
+            as_datetime(nominal_start).year + 1,
+            as_datetime(nominal_start).year + 10
+          ) %}
+            {% if ns.result == '' %}
+
+              {% set candidate =
+                '%04d-%02d-%02d %02d:%02d:00'
+                | format(
+                    year,
+                    month,
+                    day,
+                    start_hour | int,
+                    start_minute | int
+                  )
+              %}
+
+              {% if as_datetime(candidate, none) is not none %}
+                {% set ns.result = candidate %}
+              {% endif %}
+
+            {% endif %}
+          {% endfor %}
+
+          {{ ns.result }}
+
+        {% else %}
+
+          {{ nominal_start }}
+
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            time_mode in ['start', 'range']
+            and scheduled_start != ''
+            and as_timestamp(scheduled_start) <= as_timestamp(now())
+            and date_type in [
+              'today',
+              'tomorrow',
+              'day_after',
+              'absolute'
+            ]
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Der angegebene Zeitpunkt liegt in der Vergangenheit.
+      - stop: Zeitpunkt Vergangenheit
+        response_variable: response
+  - variables:
+      until_candidate: |-
+        {% if time_mode == 'until' %}
+          {{
+            (
+              requested_date
+              if requested_date != ''
+              else now().strftime('%Y-%m-%d')
+            )
+            ~ ' '
+            ~ (
+              '%02d:%02d:00'
+              | format(
+                  start_hour | int,
+                  start_minute | int
+                )
+            )
+          }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+      until_end: |-
+        {% if time_mode != 'until' %}
+
+          {{ '' }}
+
+        {% elif
+          as_timestamp(until_candidate)
+          > as_timestamp(now())
+        %}
+
+          {{ until_candidate }}
+
+        {% elif date_type == 'none' %}
+
+          {{
+            (
+              as_datetime(until_candidate)
+              + timedelta(days=1)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+          }}
+
+        {% else %}
+
+          {{ until_candidate }}
+
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: |-
+          {{
+            time_mode == 'until'
+            and as_timestamp(until_end)
+                <= as_timestamp(now())
+          }}
+    then:
+      - variables:
+          response:
+            ok: false
+            message: ❌ Die angegebene Endzeit liegt in der Vergangenheit.
+      - stop: Endzeit Vergangenheit
+        response_variable: response
+  - variables:
+      range_end: |-
+        {% if time_mode == 'range' %}
+
+          {% set start_dt = as_datetime(scheduled_start) %}
+
+          {% set candidate =
+            start_dt.replace(
+              hour=end_hour | int,
+              minute=end_minute | int,
+              second=0,
+              microsecond=0
+            )
+          %}
+
+          {% if
+            as_timestamp(candidate)
+            <= as_timestamp(start_dt)
+          %}
+            {% set candidate =
+              candidate + timedelta(days=1)
+            %}
+          {% endif %}
+
+          {{ candidate.strftime('%Y-%m-%d %H:%M:%S') }}
+
+        {% else %}
+
+          {{ '' }}
+
+        {% endif %}
+  - variables:
+      immediate_start: |-
+        {{
+          now()
+          .replace(second=0, microsecond=0)
+          .strftime('%Y-%m-%d %H:%M:%S')
+        }}
+      planned: |-
+        {{
+          time_mode != 'none'
+          or duration_minutes | int > 0
+        }}
+      immediate: |-
+        {{
+          time_mode in ['none', 'until']
+        }}
+      needs_followup: |-
+        {{
+          time_mode in ['range', 'until']
+          or duration_minutes | int > 0
+        }}
+  - variables:
+      start_at: |-
+        {% if time_mode == 'until' %}
+
+          {{ immediate_start }}
+
+        {% elif
+          time_mode == 'none'
+          and duration_minutes | int > 0
+        %}
+
+          {{ immediate_start }}
+
+        {% elif time_mode in ['start', 'range'] %}
+
+          {{ scheduled_start }}
+
+        {% else %}
+
+          {{ '' }}
+
+        {% endif %}
+  - variables:
+      end_at: |-
+        {% if time_mode == 'range' %}
+
+          {{ range_end }}
+
+        {% elif time_mode == 'until' %}
+
+          {{ until_end }}
+
+        {% elif duration_minutes | int > 0 %}
+
+          {{
+            (
+              as_datetime(start_at)
+              + timedelta(
+                  minutes=duration_minutes | int
+                )
+            ).strftime('%Y-%m-%d %H:%M:%S')
+          }}
+
+        {% elif time_mode == 'start' %}
+
+          {{
+            (
+              as_datetime(start_at)
+              + timedelta(minutes=1)
+            ).strftime('%Y-%m-%d %H:%M:%S')
+          }}
+
+        {% else %}
+
+          {{ '' }}
+
+        {% endif %}
+  - variables:
+      response:
+        ok: true
+        action: "{{ action }}"
+        after: "{{ after }}"
+        time_mode: "{{ time_mode }}"
+        duration_minutes: "{{ duration_minutes | int }}"
+        planned: "{{ planned | bool }}"
+        immediate: "{{ immediate | bool }}"
+        needs_followup: "{{ needs_followup | bool }}"
+        start_at: "{{ start_at }}"
+        end_at: "{{ end_at }}"
+        date: "{{ requested_date }}"
+        date_type: "{{ date_type }}"
+  - stop: Zeitplanung ausgewertet
+    response_variable: response
+mode: parallel
+max: 20
